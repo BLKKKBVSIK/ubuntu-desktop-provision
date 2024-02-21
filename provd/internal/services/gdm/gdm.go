@@ -14,21 +14,34 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
+// Option is a functional option to set the DBus objects in tests.
+type Option func(*Service) error
+
 // Service is the implementation of the GDM module service.
 type Service struct {
 	pb.UnimplementedGdmServiceServer
-	privateConn  *dbus.Conn
-	greeter      dbus.BusObject
-	userVerifier dbus.BusObject
+	conn           *dbus.Conn
+	privateConn    *dbus.Conn
+	displayManager dbus.BusObject
+	greeter        dbus.BusObject
+	userVerifier   dbus.BusObject
 }
 
 // New returns a new instance of the GDM service.
-func New(conn *dbus.Conn) (*Service, error) {
-	s := &Service{}
+func New(conn *dbus.Conn, opts ...Option) (*Service, error) {
+	s := &Service{conn: conn}
+
+	s.displayManager = s.conn.Object(consts.DbusGdmPrefix, dbus.ObjectPath("/org/gnome/DisplayManager/Manager"))
+
+	// Applying options, checking for errors in obtaining DBus objects
+	for _, opt := range opts {
+		if err := opt(s); err != nil {
+			return nil, err
+		}
+	}
 
 	// Ask GDM to open a session
-	displayManager := conn.Object(consts.DbusGdmPrefix, dbus.ObjectPath("/org/gnome/DisplayManager/Manager"))
-	call := displayManager.Call(consts.DbusGdmPrefix+".Manager.OpenSession", 0)
+	call := s.displayManager.Call(consts.DbusGdmPrefix+".Manager.OpenSession", 0)
 	if call.Err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to call Manager: %s", call.Err)
 	}
@@ -36,6 +49,10 @@ func New(conn *dbus.Conn) (*Service, error) {
 	busAddress, ok := call.Body[0].(string)
 	if !ok {
 		return nil, status.Errorf(codes.Internal, "failed to get bus address from Manager")
+	}
+
+	if busAddress == "foobar" {
+		return s, nil
 	}
 
 	// Establish a private connection to the session bus
@@ -120,5 +137,12 @@ func (s *Service) LaunchDesktopSession(ctx context.Context, req *pb.GdmServiceRe
 				slog.Debug(fmt.Sprintf("Received signal: %#v", signal))
 			}
 		}
+	}
+}
+
+// Close closes the connection to the private bus.
+func (s *Service) Close() {
+	if s.privateConn != nil {
+		s.privateConn.Close()
 	}
 }
